@@ -1,1 +1,31 @@
- 
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solana-coin-bot"
+version = "0.1.0"
+description = "A DexScreener trading bot for Solana tokens (and more)."
+authors = [
+  { name = "Joseph V.", email = "joseph.villalba@gmail.com" }
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["solana", "dexscreener", "bot", "crypto"]
+classifiers = [
+  "Programming Language :: Python :: 3.9",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+
+dependencies = [
+  "requests",
+  "SQLAlchemy",
+  "pandas",
+  "python-telegram-bot"
+]
+
+[project.urls]
+"Source Code" = "https://github.com/jvillalbaj2lc/solana-coin-bot"
+"Tracker" = "https://github.com/jvillalbaj2lc/solana-coin-bot/issues"
