@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import logging
 from typing import Any, Dict
 
@@ -9,54 +10,91 @@ class ConfigError(Exception):
     """Custom exception for configuration-related errors."""
     pass
 
+def create_default_config(config_path: str) -> None:
+    """
+    Create a default configuration file by copying the sample config.
+    
+    :param config_path: Path where the config file should be created
+    :raises ConfigError: If sample config doesn't exist or can't create config
+    """
+    sample_path = f"{config_path}.sample"
+    if not os.path.exists(sample_path):
+        raise ConfigError(
+            f"Neither config file '{config_path}' nor sample '{sample_path}' found. "
+            "Please ensure you have a valid configuration file."
+        )
+    
+    try:
+        shutil.copy2(sample_path, config_path)
+        logger.info(f"Created new config file at {config_path} from sample")
+    except IOError as e:
+        raise ConfigError(f"Failed to create config file from sample: {e}")
+
 def load_config(
     config_path: str = None,
-    env_prefix: str = "DEX_"
+    env_prefix: str = "DEX_",
+    auto_create: bool = True
 ) -> Dict[str, Any]:
     """
     Load configuration from a JSON file and optionally override or fill
     values from environment variables.
 
     :param config_path: Path to the JSON configuration file. If not provided,
-                        defaults to 'configs/config.json'.
-    :param env_prefix:  Prefix for environment variables that can override
-                        or supplement config values (optional).
+                       defaults to 'configs/config.json'.
+    :param env_prefix: Prefix for environment variables that can override
+                      or supplement config values (optional).
+    :param auto_create: If True, attempts to create config from sample if missing.
     :return: Dictionary representing the complete, validated configuration.
+    :raises ConfigError: If configuration loading or validation fails
     """
     if not config_path:
-        # Default location for your config
         config_path = os.path.join("configs", "config.json")
+
+    # Ensure config directory exists
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+    # Check if config exists, try to create from sample if enabled
+    if not os.path.exists(config_path):
+        if auto_create:
+            create_default_config(config_path)
+        else:
+            raise ConfigError(
+                f"Configuration file not found: {config_path}\n"
+                f"Please copy {config_path}.sample to {config_path} and update with your settings."
+            )
 
     # Load the JSON config file
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
         logger.info(f"Loaded configuration from {config_path}")
-    except FileNotFoundError:
-        logger.error(f"Configuration file not found: {config_path}")
-        raise ConfigError(f"Configuration file not found: {config_path}")
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in config file: {config_path}, error: {e}")
-        raise ConfigError(f"Invalid JSON in config file: {config_path}")
+        raise ConfigError(
+            f"Invalid JSON in config file: {config_path}\n"
+            f"Error: {str(e)}\n"
+            "Please verify your configuration file format."
+        )
+    except Exception as e:
+        raise ConfigError(f"Failed to read config file: {str(e)}")
 
-    # Example of environment-based overrides
-    # Let’s say you want to allow overrides of the Telegram bot token
-    # via DEX_TELEGRAM_BOT_TOKEN in your environment, or the Pocket Universe
-    # API token via DEX_POCKET_UNIVERSE_API_TOKEN, etc.
-
-    # We can define a helper function or do inline checks:
-    # This approach is an example—customize as needed for your keys.
-    _env_override(config_data, ["telegram", "bot_token"], env_prefix, "TELEGRAM_BOT_TOKEN")
-    _env_override(config_data, ["telegram", "chat_id"], env_prefix, "TELEGRAM_CHAT_ID")
-    _env_override(config_data, ["volume_verification", "pocket_universe", "api_token"], env_prefix, "POCKET_UNIVERSE_API_TOKEN")
-    _env_override(config_data, ["rugcheck", "api_token"], env_prefix, "RUGCHECK_API_TOKEN")
-
-    # Additional overrides or logic can be added below...
+    # Process environment variable overrides
+    _process_env_overrides(config_data, env_prefix)
     
-    # Validate required fields
+    # Validate the configuration
     _validate_config(config_data)
 
     return config_data
+
+def _process_env_overrides(config_data: Dict[str, Any], env_prefix: str) -> None:
+    """Process all environment variable overrides for the configuration."""
+    env_mappings = {
+        "TELEGRAM_BOT_TOKEN": ["telegram", "bot_token"],
+        "TELEGRAM_CHAT_ID": ["telegram", "chat_id"],
+        "RUGCHECK_API_TOKEN": ["rugcheck", "api_token"]
+    }
+    
+    for env_key, nested_keys in env_mappings.items():
+        _env_override(config_data, nested_keys, env_prefix, env_key)
 
 def _env_override(
     config_data: Dict[str, Any],
@@ -106,8 +144,14 @@ def _validate_config(config_data: Dict[str, Any]) -> None:
 
     :param config_data: The final merged config dictionary.
     """
-    # Example mandatory fields – adjust as needed:
-    required_top_level_keys = ["filters", "coin_blacklist", "dev_blacklist", "volume_verification", "rugcheck", "telegram"]
+    # Required top-level keys
+    required_top_level_keys = [
+        "filters",
+        "coin_blacklist",
+        "dev_blacklist",
+        "rugcheck",
+        "telegram"
+    ]
 
     for key in required_top_level_keys:
         if key not in config_data:

@@ -1,10 +1,61 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite3
+
+# Sensitive Configuration Files
+configs/config.prod.json
+configs/config.dev.json
+configs/*.local.json
+configs/secrets.json
+.env
+
+# API Keys and Secrets
+**/api_keys.json
+**/secrets.json
+**/*.key
+**/*.pem
+**/*.pub
+
+# Temporary files
+*.tmp
+.DS_Store
 
 # Distribution / packaging
 .Python
@@ -169,3 +220,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Project-specific
+data/
+*.db
+configs/config.json

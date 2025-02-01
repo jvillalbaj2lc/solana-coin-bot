@@ -1,52 +1,95 @@
 # app/database/base.py
 import os
 import logging
-from sqlalchemy import create_engine
+from pathlib import Path
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
 # Declarative Base
 Base = declarative_base()
 
+def get_database_path() -> Path:
+    """Get the database file path, creating directories if needed."""
+    # Use data directory in project root
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+    return data_dir / "dexscreener.db"
+
 def get_database_url() -> str:
     """
-    Build or retrieve the database URL string for SQLAlchemy.
-    If you want to support multiple environments or pass a DB URL
-    from config or environment variables, handle that here.
-
-    By default, we’re using a local SQLite file named 'dexscreener_data.db'.
+    Build the database URL string for SQLAlchemy.
+    Uses SQLite database in the data directory.
     """
-    # Option 1: Hard-code or read from environment variables
-    # Example:
-    #   db_url = os.getenv("DATABASE_URL", "sqlite:///dexscreener_data.db")
+    db_path = get_database_path()
+    return f"sqlite:///{db_path}"
 
-    # Option 2: Build from config, if you prefer
-    #   from app.config.loader import load_config
-    #   config = load_config()
-    #   db_url = config.get("database", {}).get("url", "sqlite:///dexscreener_data.db")
-
-    # For now, let's keep it simple:
-    db_url = "sqlite:///dexscreener_data.db"
-    return db_url
-
-# Create Engine
+# Create Engine with proper configuration
 DATABASE_URL = get_database_url()
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-    echo=False  # Set to True for verbose SQL logging
+    connect_args={
+        "check_same_thread": False,  # Needed for SQLite
+        "timeout": 30  # Wait up to 30 seconds for locks
+    } if DATABASE_URL.startswith("sqlite") else {},
+    pool_pre_ping=True,  # Enable automatic reconnection
+    pool_recycle=3600,   # Recycle connections every hour
+    echo=False          # Set to True for SQL logging
 )
 
 # Session maker
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def init_db():
+def check_db_exists() -> bool:
+    """Check if the database exists and has the required tables."""
+    db_path = get_database_path()
+    if not db_path.exists():
+        return False
+    
+    try:
+        inspector = inspect(engine)
+        # Check if our main table exists
+        return "token_snapshots" in inspector.get_table_names()
+    except SQLAlchemyError as e:
+        logger.error(f"Error checking database: {e}")
+        return False
+
+def init_db(force: bool = False) -> None:
     """
-    Initialize the database. Call this once (e.g., at app startup)
-    to ensure tables are created if they don't exist.
+    Initialize the database, creating tables if they don't exist.
+    
+    :param force: If True, drop and recreate all tables
+    :raises: SQLAlchemyError if database initialization fails
     """
-    logger.info("Creating all database tables if not already existing...")
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database initialization complete.")
+    try:
+        if force:
+            logger.warning("Forcing database reinitialization...")
+            Base.metadata.drop_all(bind=engine)
+        
+        if force or not check_db_exists():
+            logger.info("Creating database tables...")
+            Base.metadata.create_all(bind=engine)
+            logger.info("Database initialization complete.")
+        else:
+            logger.info("Database already initialized.")
+            
+    except SQLAlchemyError as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
+
+def get_db():
+    """
+    Get a database session.
+    Use this as a context manager:
+    
+    with get_db() as db:
+        db.query(...)
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

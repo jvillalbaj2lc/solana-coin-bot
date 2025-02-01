@@ -1,97 +1,102 @@
 # app/services/analysis.py
 
 import logging
-import datetime
-import pandas as pd
-from typing import Dict, Any, List, Tuple
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
 from sqlalchemy.orm import Session
+
 from app.database.models import TokenSnapshot
 
 logger = logging.getLogger(__name__)
 
-def analyze_token_trends(
+def analyze_pumped_tokens(
     session: Session,
-    config: Dict[str, Any],
-    lookback_hours: int = 6,
-    price_increase_threshold: float = 50.0
-) -> List[Tuple[str, float]]:
+    lookback_minutes: int = 60,
+    min_price_increase_percent: float = 20.0,
+    min_volume_usd: float = 1000.0
+) -> List[Dict[str, Any]]:
     """
-    Analyzes historical token snapshots to detect large price pumps over the given lookback period.
-    Specifically, it flags tokens whose price has increased by more than 'price_increase_threshold'
-    percent in the last 'lookback_hours' hours.
-
-    Steps:
-    1) Query token snapshots from the DB for the last 'lookback_hours'.
-    2) Convert to a DataFrame and group by token address.
-    3) For each token, find the earliest and latest price in that period.
-    4) Calculate percentage change. If above threshold, flag the token.
-
-    :param session: SQLAlchemy Session object.
-    :param config:  The application config dictionary (if needed for thresholds or filtering).
-    :param lookback_hours: How many hours back to look for data.
-    :param price_increase_threshold: Minimum % increase to consider a "pump."
-    :return: A list of tuples: [(token_address, percentage_increase), ...]
+    Analyze token snapshots to detect significant price increases.
+    
+    :param session: Database session
+    :param lookback_minutes: How far back to look for price changes
+    :param min_price_increase_percent: Minimum price increase to consider
+    :param min_volume_usd: Minimum volume in USD to consider
+    :return: List of pumped token details
     """
-
-    # 1) Determine the cutoff time
-    now = datetime.datetime.utcnow()
-    cutoff_time = now - datetime.timedelta(hours=lookback_hours)
-
-    # 2) Query the relevant snapshots from the DB
-    #    We only retrieve snapshots from the last X hours to reduce data load
-    snapshots_q = (
+    cutoff_time = datetime.utcnow() - timedelta(minutes=lookback_minutes)
+    
+    # Get snapshots ordered by timestamp
+    snapshots = (
         session.query(TokenSnapshot)
         .filter(TokenSnapshot.timestamp >= cutoff_time)
         .order_by(TokenSnapshot.timestamp.asc())
+        .all()
     )
-    snapshots = snapshots_q.all()
-
-    if not snapshots:
-        logger.info("No snapshots found in the last %d hours.", lookback_hours)
-        return []
-
-    # Convert to a DataFrame
-    records = []
-    for snap in snapshots:
-        records.append({
-            "token_address": snap.token_address,
-            "price_usd": snap.price_usd,
-            "timestamp": snap.timestamp
-        })
-    df = pd.DataFrame(records)
-
-    # 3) Sort by timestamp for each token
-    df.sort_values("timestamp", inplace=True)
-
-    # 4) Group by token and compute earliest & latest price in the period
-    flagged = []
-    for token_addr, group in df.groupby("token_address"):
-        if len(group) < 2:
-            # Not enough data points to compare
+    
+    # Group snapshots by token
+    token_snapshots: Dict[str, List[TokenSnapshot]] = {}
+    for snapshot in snapshots:
+        if snapshot.token_address not in token_snapshots:
+            token_snapshots[snapshot.token_address] = []
+        token_snapshots[snapshot.token_address].append(snapshot)
+    
+    # Analyze each token's price movement
+    pumped_tokens = []
+    for token_address, token_history in token_snapshots.items():
+        if len(token_history) < 2:
             continue
-
-        # Earliest price in this lookback window
-        first_price = group.iloc[0]["price_usd"]
-        # Latest price
-        last_price = group.iloc[-1]["price_usd"]
-
-        # Validate we have numeric values
-        if first_price is None or last_price is None:
+            
+        # Get first and last snapshots
+        first = token_history[0]
+        last = token_history[-1]
+        
+        # Skip if missing required data
+        if not (first.price_usd and last.price_usd and last.volume_usd):
             continue
-        if first_price <= 0:
-            continue
-
-        # Calculate percentage change
-        pct_change = ((last_price - first_price) / first_price) * 100.0
-
-        # 5) If above threshold, flag the token
-        if pct_change >= price_increase_threshold:
-            flagged.append((token_addr, pct_change))
-
-    if flagged:
-        logger.info("Found %d tokens above the price-increase threshold.", len(flagged))
-    else:
-        logger.info("No tokens flagged for a pump > %.2f%% in the last %d hours.",
-                    price_increase_threshold, lookback_hours)
-
-    return flagged
+            
+        # Calculate price change
+        price_change_percent = ((last.price_usd - first.price_usd) / first.price_usd) * 100
+        
+        # Check if meets pump criteria
+        if (price_change_percent >= min_price_increase_percent and 
+            last.volume_usd >= min_volume_usd):
+            
+            # Get risk level if available
+            risk_level = "Unknown"
+            risk_score = None
+            if last.risk_data:
+                risk_score = last.risk_data.get('score')
+                if risk_score is not None:
+                    if risk_score < 500:
+                        risk_level = "LOW"
+                    elif risk_score < 750:
+                        risk_level = "MEDIUM"
+                    elif risk_score < 1000:
+                        risk_level = "HIGH"
+                    else:
+                        risk_level = "CRITICAL"
+            
+            pumped_tokens.append({
+                'token_address': token_address,
+                'chain_id': last.chain_id,
+                'token_name': last.token_name,
+                'token_symbol': last.token_symbol,
+                'dexscreener_url': last.dexscreener_url,
+                'description': last.description,
+                'links': last.links,
+                'initial_price': first.price_usd,
+                'current_price': last.price_usd,
+                'price_change_percent': price_change_percent,
+                'volume_usd': last.volume_usd,
+                'liquidity_usd': last.liquidity_usd,
+                'risk_level': risk_level,
+                'risk_score': risk_score,
+                'risk_data': last.risk_data
+            })
+    
+    return sorted(
+        pumped_tokens,
+        key=lambda x: x['price_change_percent'],
+        reverse=True
+    )

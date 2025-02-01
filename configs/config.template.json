@@ -1,0 +1,26 @@
+{
+    "filters": {
+      "min_liquidity_usd": 1000,
+      "min_price_usd": 0.000000001,
+      "max_price_usd": 10.0
+    },
+    "coin_blacklist": [
+      "0xBadCoinAddress1",
+      "0xBadCoinAddress2"
+    ],
+    "dev_blacklist": [
+      "rug_dev1",
+      "rug_dev2"
+    ],
+    "volume_verification": {
+      "use_internal_algorithm": true,
+      "fake_volume_threshold": 5.0
+    },
+    "rugcheck": {
+      "max_risk_score": 1000
+    },
+    "telegram": {
+      "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+      "chat_id": "YOUR_TELEGRAM_CHAT_ID"
+    }
+} 

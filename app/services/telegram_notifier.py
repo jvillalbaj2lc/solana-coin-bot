@@ -2,114 +2,150 @@
 
 import logging
 from typing import Dict, Any, Optional
+import requests
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-class VolumeVerifier:
-    """
-    Handles verification of token volume using:
-    1) Internal threshold-based checks.
-    2) Optional external verification via Pocket Universe.
-    """
+@dataclass
+class NotifierConfig:
+    """Configuration for the Telegram notifier."""
+    bot_token: str 
+    chat_id: str 
+    timeout: int = 10
+    max_retries: int = 3
 
-    def __init__(
-        self,
-        use_internal_algorithm: bool,
-        fake_volume_threshold: float,
-        use_pocket_universe: bool,
-        pocket_universe_service: Optional[Any] = None
-    ):
+class TelegramNotifier:
+    """Service for sending notifications via Telegram."""
+    
+    def __init__(self, config: NotifierConfig):
         """
-        :param use_internal_algorithm: If True, apply the local threshold check on volume.
-        :param fake_volume_threshold: Minimum volume to consider 'non-fake'.
-        :param use_pocket_universe: If True, also call the external Pocket Universe check.
-        :param pocket_universe_service: Instance of PocketUniverseService or None if not needed.
+        Initialize the Telegram notifier.
+        
+        :param config: NotifierConfig instance with required settings
         """
-        self.use_internal_algorithm = use_internal_algorithm
-        self.fake_volume_threshold = fake_volume_threshold
-        self.use_pocket_universe = use_pocket_universe
-        self.pocket_universe_service = pocket_universe_service
-
-    def verify_volume(self, token_data: Dict[str, Any]) -> bool:
+        self.config = config
+        self.session = requests.Session()
+        self._consecutive_failures = 0
+        self._total_requests = 0
+        self._failed_requests = 0
+        
+        # Validate credentials on init
+        self._validate_credentials()
+        
+    def _validate_credentials(self) -> None:
         """
-        Performs volume verification. Steps:
-        1) If internal checks are enabled, ensure the token's volume is above fake_volume_threshold.
-        2) If Pocket Universe check is enabled, call the external service to verify authenticity.
-
-        :param token_data: A dictionary that includes 'volumeUsd', 'tokenAddress', etc.
-        :return: True if volume passes all checks, False otherwise.
+        Validate the bot token and chat ID by making a test API call.
+        
+        :raises ValueError: If credentials are invalid
         """
-        # 1) Parse current volume
-        volume_key = 'volumeUsd'
-        current_volume = 0.0
+        if not self.config.bot_token or not self.config.chat_id:
+            raise ValueError("Missing bot token or chat ID")
+            
         try:
-            current_volume = float(token_data.get(volume_key, 0.0))
-        except (TypeError, ValueError):
-            logger.warning(f"VolumeVerifier: Could not parse volume for token {token_data.get('tokenAddress')}.")
+            response = self.session.get(
+                f"https://api.telegram.org/bot{self.config.bot_token}/getMe",
+                timeout=self.config.timeout
+            )
+            response.raise_for_status()
+            logger.info("Telegram credentials validated successfully")
+        except Exception as e:
+            raise ValueError(f"Invalid Telegram credentials: {str(e)}")
+
+    def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
+        """
+        Send a message via Telegram.
+        
+        :param message: The message to send
+        :param parse_mode: Message parse mode (HTML/Markdown)
+        :return: True if sent successfully, False otherwise
+        """
+        if not message:
+            logger.warning("Attempted to send empty message")
             return False
-
-        # 2) Internal threshold check
-        if self.use_internal_algorithm:
-            if current_volume < self.fake_volume_threshold:
-                logger.info(
-                    f"VolumeVerifier: Token {token_data.get('tokenAddress')} volume "
-                    f"{current_volume} < threshold {self.fake_volume_threshold}"
-                )
-                return False
-            else:
-                logger.debug(
-                    f"VolumeVerifier: Internal volume check passed for token {token_data.get('tokenAddress')}, "
-                    f"{current_volume} >= {self.fake_volume_threshold}"
-                )
-
-        # 3) External Pocket Universe check
-        if self.use_pocket_universe and self.pocket_universe_service is not None:
-            token_address = token_data.get("tokenAddress")
-            if not self.pocket_universe_service.verify_volume_authenticity(token_address):
-                logger.info(
-                    f"VolumeVerifier: Pocket Universe flagged token {token_address} as suspicious volume."
-                )
-                return False
-
-        # If it reaches here, all checks passed
-        return True
-
-
-def build_volume_verifier_from_config(config: Dict[str, Any]) -> VolumeVerifier:
-    """
-    Factory function to build a VolumeVerifier instance from the app's configuration dictionary.
-
-    Expects something like:
-    config["volume_verification"] = {
-        "use_internal_algorithm": true,
-        "fake_volume_threshold": 5.0,
-        "use_pocket_universe": true,
-        "pocket_universe": {
-            "api_url": "https://api.pocketuniverse.com/verify",
-            "api_token": "YOUR_POCKET_UNIVERSE_API_TOKEN"
+            
+        url = f"https://api.telegram.org/bot{self.config.bot_token}/sendMessage"
+        data = {
+            "chat_id": self.config.chat_id,
+            "text": message,
+            "parse_mode": parse_mode
         }
-    }
+        
+        for attempt in range(self.config.max_retries):
+            try:
+                response = self.session.post(
+                    url,
+                    json=data,
+                    timeout=self.config.timeout
+                )
+                response.raise_for_status()
+                
+                self._consecutive_failures = 0
+                self._total_requests += 1
+                return True
+                
+            except Exception as e:
+                self._consecutive_failures += 1
+                self._failed_requests += 1
+                
+                if attempt == self.config.max_retries - 1:
+                    logger.error(
+                        f"Failed to send Telegram message after {self.config.max_retries} "
+                        f"attempts: {str(e)}"
+                    )
+                    return False
+                    
+                logger.warning(
+                    f"Telegram send attempt {attempt + 1} failed: {str(e)}. "
+                    "Retrying..."
+                )
+        
+        return False
 
-    :param config: The entire app config, typically loaded by loader.py
-    :return: A configured VolumeVerifier instance.
+    @property
+    def is_healthy(self) -> bool:
+        """Check if the notifier service is healthy."""
+        return (
+            self._consecutive_failures < 5 and
+            (self._total_requests == 0 or
+             self._failed_requests / self._total_requests < 0.25)
+        )
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get service statistics."""
+        return {
+            "total_requests": self._total_requests,
+            "failed_requests": self._failed_requests,
+            "consecutive_failures": self._consecutive_failures,
+            "error_rate": (
+                self._failed_requests / self._total_requests
+                if self._total_requests > 0 else 0
+            ),
+            "is_healthy": self.is_healthy
+        }
+
+def build_notifier_from_config(config: Dict[str, Any]) -> Optional[TelegramNotifier]:
     """
-    vol_ver_cfg = config.get("volume_verification", {})
-    use_internal = vol_ver_cfg.get("use_internal_algorithm", True)
-    threshold = vol_ver_cfg.get("fake_volume_threshold", 5.0)
-    use_pu = vol_ver_cfg.get("use_pocket_universe", False)
-
-    pocket_universe_service = None
-    if use_pu:
-        from app.services.pocket_universe_service import PocketUniverseService  # local import to avoid circular deps
-        pu_cfg = vol_ver_cfg.get("pocket_universe", {})
-        api_url = pu_cfg.get("api_url")
-        api_token = pu_cfg.get("api_token")
-        pocket_universe_service = PocketUniverseService(api_url, api_token)
-
-    verifier = VolumeVerifier(
-        use_internal_algorithm=use_internal,
-        fake_volume_threshold=threshold,
-        use_pocket_universe=use_pu,
-        pocket_universe_service=pocket_universe_service
-    )
-    return verifier
+    Build a TelegramNotifier instance from configuration.
+    
+    :param config: Configuration dictionary
+    :return: TelegramNotifier instance or None if disabled/invalid
+    """
+    telegram_cfg = config.get("telegram", {})
+    if not telegram_cfg:
+        logger.info("Telegram notifications disabled (no config)")
+        return None
+        
+    try:
+        notifier_config = NotifierConfig(
+            bot_token=telegram_cfg["bot_token"],
+            chat_id=telegram_cfg["chat_id"],
+            timeout=telegram_cfg.get("timeout", 10),
+            max_retries=telegram_cfg.get("max_retries", 3)
+        )
+        
+        return TelegramNotifier(notifier_config)
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize Telegram notifier: {str(e)}")
+        return None
