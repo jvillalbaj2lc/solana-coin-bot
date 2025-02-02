@@ -1,0 +1,12 @@
+fly.toml
+.venv/
+__pycache__/
+*.pyc
+.git/
+.env
+*.key
+*.pem
+*.pub
+.pytest_cache/
+.coverage
+htmlcov/

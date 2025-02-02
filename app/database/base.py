@@ -12,23 +12,17 @@ logger = logging.getLogger(__name__)
 # Declarative Base
 Base = declarative_base()
 
-def get_database_path() -> Path:
-    """Get the database file path, creating directories if needed."""
-    # Use data directory in project root
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
-    return data_dir / "dexscreener.db"
-
 def get_database_url() -> str:
     """
     Build the database URL string for SQLAlchemy.
-    Uses SQLite database in the data directory.
+    Uses environment variable DATABASE_URL if set, otherwise falls back to local SQLite.
     """
-    db_path = get_database_path()
-    return f"sqlite:///{db_path}"
+    return os.getenv('DATABASE_URL', 'sqlite:///data/dexscreener.db')
 
 # Create Engine with proper configuration
 DATABASE_URL = get_database_url()
+logger.info(f"Initializing database with URL: {DATABASE_URL}")
+
 engine = create_engine(
     DATABASE_URL,
     connect_args={
@@ -45,10 +39,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def check_db_exists() -> bool:
     """Check if the database exists and has the required tables."""
-    db_path = get_database_path()
-    if not db_path.exists():
-        return False
-    
     try:
         inspector = inspect(engine)
         # Check if our main table exists

@@ -30,6 +30,9 @@ dependencies = [
 "Source Code" = "https://github.com/jvillalbaj2lc/solana-coin-bot"
 "Tracker" = "https://github.com/jvillalbaj2lc/solana-coin-bot/issues"
 
+[project.scripts]
+solana-coin-bot = "app.main:main"
+
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["configs"]

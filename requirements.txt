@@ -1,7 +1,8 @@
-requests==2.32.3
+requests==2.32.0
 SQLAlchemy==2.0.19
 pandas==2.0.3
 python-telegram-bot==21.10
+-e .
 
 # Development / Testing (optional):
 # pytest==7.3.1

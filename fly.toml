@@ -1,0 +1,19 @@
+# fly.toml app configuration file generated for solana-coin-bot
+app = 'solana-coin-bot'
+primary_region = 'dfw'
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = '8080'
+
+[mounts]
+  source="solana_bot_data"
+  destination="/data"
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
+  count = 1
