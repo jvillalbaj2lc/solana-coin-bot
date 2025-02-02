@@ -1,19 +1,12 @@
-# app/services/volume_verifier.py
+# app/services/telegram_notifier.py
 
 import logging
 from typing import Dict, Any, Optional
 import requests
-from dataclasses import dataclass
+import re
+from app.services.telegram_types import NotifierConfig
 
 logger = logging.getLogger(__name__)
-
-@dataclass
-class NotifierConfig:
-    """Configuration for the Telegram notifier."""
-    bot_token: str 
-    chat_id: str 
-    timeout: int = 10
-    max_retries: int = 3
 
 class TelegramNotifier:
     """Service for sending notifications via Telegram."""
@@ -123,6 +116,24 @@ class TelegramNotifier:
             ),
             "is_healthy": self.is_healthy
         }
+
+    def handle_message(self, message: Dict[str, Any]) -> None:
+        """
+        Handle incoming messages and commands.
+        
+        :param message: Message data from Telegram
+        """
+        try:
+            text = message.get('text', '')
+            if not text:
+                return
+                
+            # Import command handlers here to avoid circular imports
+            from app.services.telegram_commands import handle_command
+            handle_command(self, text)
+                    
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
 
 def build_notifier_from_config(config: Dict[str, Any]) -> Optional[TelegramNotifier]:
     """

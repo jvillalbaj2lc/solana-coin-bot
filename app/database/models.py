@@ -80,14 +80,15 @@ class TokenSnapshot(Base):
         :param risk_data: Optional risk assessment data
         :return: TokenSnapshot instance
         """
-        links_dict = [
-            {
-                'url': link.url,
-                **({"type": link.type} if link.type else {}),
-                **({"label": link.label} if link.label else {})
-            }
-            for link in (profile.links or [])
-        ] if profile.links else []
+        # Convert links list to a dictionary with indices as keys
+        links_dict = {}
+        if profile.links:
+            for idx, link in enumerate(profile.links):
+                links_dict[str(idx)] = {
+                    'url': link.url,
+                    **({"type": link.type} if link.type else {}),
+                    **({"label": link.label} if link.label else {})
+                }
         
         return cls(
             token_address=profile.token_address,

@@ -52,7 +52,7 @@ def main():
         init_db()
         
         # 5. Run Scheduler
-        interval_sec = config.get("scheduler", {}).get("interval_sec", 600)
+        interval_sec = config.get("scheduler", {}).get("interval_sec", 60)
         logger.info(f"Starting scheduler loop, interval={interval_sec} seconds...")
         run_scheduler(config, interval_sec=interval_sec)
         

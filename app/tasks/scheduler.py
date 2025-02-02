@@ -11,6 +11,7 @@ from app.tasks.fetch_and_store import fetch_and_store_tokens
 from app.services.analysis import analyze_pumped_tokens
 from app.database.base import SessionLocal
 from app.services.telegram_notifier import TelegramNotifier, NotifierConfig
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ class TaskRunner:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.notifier = self._setup_notifier()
+        self._should_stop = False
+        self._message_thread = None
     
     def _setup_notifier(self) -> Optional[TelegramNotifier]:
         """Setup Telegram notifier if configured."""
@@ -69,6 +72,53 @@ class TaskRunner:
             logger.error(f"Failed to setup notifier: {e}")
         return None
 
+    def start_message_handler(self) -> None:
+        """Start the message handling thread."""
+        if self.notifier:
+            self._message_thread = threading.Thread(
+                target=self._message_loop,
+                daemon=True
+            )
+            self._message_thread.start()
+    
+    def stop_message_handler(self) -> None:
+        """Stop the message handling thread."""
+        self._should_stop = True
+        if self._message_thread:
+            self._message_thread.join(timeout=5.0)
+    
+    def _message_loop(self) -> None:
+        """Background thread to handle incoming messages."""
+        if not self.notifier:
+            return
+            
+        last_update_id = 0
+        while not self._should_stop:
+            try:
+                # Get updates from Telegram
+                response = self.notifier.session.get(
+                    f"https://api.telegram.org/bot{self.notifier.config.bot_token}/getUpdates",
+                    params={
+                        "offset": last_update_id + 1,
+                        "timeout": 30
+                    }
+                )
+                
+                if response.ok:
+                    updates = response.json()
+                    if updates.get("ok") and updates.get("result"):
+                        for update in updates["result"]:
+                            # Process the update
+                            if "message" in update:
+                                self.notifier.handle_message(update["message"])
+                            last_update_id = update["update_id"]
+                
+                time.sleep(1)  # Small delay to prevent hammering the API
+                
+            except Exception as e:
+                logger.error(f"Error in message loop: {e}")
+                time.sleep(5)  # Longer delay on error
+    
     def run_fetch_and_store(self) -> None:
         """Run the fetch and store task with error handling."""
         try:
@@ -161,35 +211,44 @@ class Scheduler:
         self.health.start_time = datetime.now()
         self.task_runner.send_notification("🟢 Bot started successfully!")
         
-        while self.health.is_running:
-            try:
-                self._run_cycle()
-                self.health.record_success()
-                
-            except SchedulerError as e:
-                self.health.record_failure(str(e))
-                
-                if self.health.consecutive_failures >= self.max_consecutive_failures:
-                    error_msg = (
-                        f"⛔ Critical: {self.max_consecutive_failures} consecutive failures. "
-                        f"Last error: {self.health.last_error}"
-                    )
-                    logger.error(error_msg)
-                    self.task_runner.notify_error(error_msg)
-                    # Add exponential backoff for recovery
-                    cooldown = self.error_cooldown_sec * (2 ** (self.health.consecutive_failures - 1))
-                    logger.info(f"Backing off for {cooldown} seconds before retry...")
-                    time.sleep(cooldown)
-                
-            except Exception as e:
-                error_msg = f"Unexpected error in scheduler: {str(e)}"
-                logger.exception(error_msg)
-                self.health.record_failure(error_msg)
-                self.task_runner.notify_error(error_msg)
+        try:
+            # Start message handler
+            self.task_runner.start_message_handler()
             
-            # Sleep until next cycle
-            logger.info(f"Scheduler sleeping for {self.interval_sec} seconds.")
-            time.sleep(self.interval_sec)
+            while self.health.is_running:
+                try:
+                    self._run_cycle()
+                    self.health.record_success()
+                    
+                except SchedulerError as e:
+                    self.health.record_failure(str(e))
+                    
+                    if self.health.consecutive_failures >= self.max_consecutive_failures:
+                        error_msg = (
+                            f"⛔ Critical: {self.max_consecutive_failures} consecutive failures. "
+                            f"Last error: {self.health.last_error}"
+                        )
+                        logger.error(error_msg)
+                        self.task_runner.notify_error(error_msg)
+                        # Add exponential backoff for recovery
+                        cooldown = self.error_cooldown_sec * (2 ** (self.health.consecutive_failures - 1))
+                        logger.info(f"Backing off for {cooldown} seconds before retry...")
+                        time.sleep(cooldown)
+                    
+                except Exception as e:
+                    error_msg = f"Unexpected error in scheduler: {str(e)}"
+                    logger.exception(error_msg)
+                    self.health.record_failure(error_msg)
+                    self.task_runner.notify_error(error_msg)
+                
+                # Sleep until next cycle
+                logger.info(f"Scheduler sleeping for {self.interval_sec} seconds.")
+                time.sleep(self.interval_sec)
+            
+        except KeyboardInterrupt:
+            logger.info("Shutting down scheduler...")
+        finally:
+            self.task_runner.stop_message_handler()
         
         logger.info("Scheduler stopped.")
     

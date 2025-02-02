@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from app.database.base import SessionLocal
 from app.database.models import TokenSnapshot
@@ -30,7 +31,7 @@ class TokenMetrics:
 
 def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     """
-    Safely convert a value to float.
+    Safely convert a value to float while preserving precision.
     
     :param value: Value to convert
     :param default: Default value if conversion fails
@@ -44,13 +45,13 @@ def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
             # Handle string numbers with common suffixes
             value = value.strip().lower()
             if value.endswith('k'):
-                return float(value[:-1]) * 1000
+                return float(Decimal(value[:-1]) * 1000)
             if value.endswith('m'):
-                return float(value[:-1]) * 1000000
+                return float(Decimal(value[:-1]) * 1000000)
             if value.endswith('b'):
-                return float(value[:-1]) * 1000000000
+                return float(Decimal(value[:-1]) * 1000000000)
         
-        # Try decimal first for better precision
+        # Use Decimal for precise conversion
         return float(Decimal(str(value)))
     except (ValueError, InvalidOperation, TypeError):
         return default
@@ -105,12 +106,26 @@ def validate_token_data(
 def fetch_and_store_tokens(config: Dict[str, Any]) -> None:
     """
     Fetch and store token profiles with enhanced validation and filtering.
+    Updates existing tokens without sending notifications.
     
     :param config: Application configuration
     """
     # Initialize clients
     dexscreener = DexscreenerClient()
     rugcheck = setup_rugcheck_service(config)
+    
+    # Initialize Telegram notifier
+    notifier = None
+    if config.get("telegram"):
+        try:
+            from app.services.telegram_notifier import TelegramNotifier, NotifierConfig
+            notifier_config = NotifierConfig(
+                bot_token=config["telegram"]["bot_token"],
+                chat_id=config["telegram"]["chat_id"]
+            )
+            notifier = TelegramNotifier(notifier_config)
+        except Exception as e:
+            logger.error(f"Failed to initialize Telegram notifier: {e}")
     
     try:
         # Fetch latest token profiles
@@ -121,6 +136,7 @@ def fetch_and_store_tokens(config: Dict[str, Any]) -> None:
         tokens_processed = 0
         tokens_filtered = 0
         tokens_stored = 0
+        tokens_updated = 0
         
         with SessionLocal() as session:
             for profile in profiles:
@@ -133,6 +149,16 @@ def fetch_and_store_tokens(config: Dict[str, Any]) -> None:
                     logger.info(f"Initial Symbol: {profile.symbol}")
                     
                     tokens_processed += 1
+                    
+                    # Check if token exists by contract address
+                    existing_token = (
+                        session.query(TokenSnapshot)
+                        .filter(
+                            TokenSnapshot.token_address == profile.token_address,
+                            TokenSnapshot.chain_id == profile.chain_id
+                        )
+                        .first()
+                    )
                     
                     # Extract token data
                     token_address = profile.token_address
@@ -183,16 +209,21 @@ def fetch_and_store_tokens(config: Dict[str, Any]) -> None:
                             profile.symbol = token_symbol
                             logger.info(f"Updated token symbol to: {token_symbol}")
                         
-                        price_usd = float(best_pair.get('priceUsd', 0) or 0)
+                        # Get price directly from API response to preserve precision
+                        price_str = best_pair.get('priceUsd', '0')
+                        price_usd = safe_float(price_str, 0)
+                        
                         volume = best_pair.get('volume', {})
                         volume_usd = float(volume.get('h24', 0) if isinstance(volume, dict) else 0)
                         liquidity = best_pair.get('liquidity', {})
                         liquidity_usd = float(liquidity.get('usd', 0) if isinstance(liquidity, dict) else 0)
                         
+                        # Format price with its natural precision for logging
+                        price_str = str(Decimal(str(price_usd)))
                         logger.info(
                             f"Token metrics:\n"
                             f"Name: {profile.name} ({profile.symbol})\n"
-                            f"Price USD: ${price_usd:.12f}\n"
+                            f"Price USD: ${price_str}\n"
                             f"Volume USD: ${volume_usd:,.2f}\n"
                             f"Liquidity USD: ${liquidity_usd:,.2f}"
                         )
@@ -241,30 +272,98 @@ def fetch_and_store_tokens(config: Dict[str, Any]) -> None:
                             logger.debug(f"Risk assessment data: {risk_data}")
                         except Exception as e:
                             logger.warning(f"Rug check failed for {token_address}: {e}")
+                            # Skip tokens where rugcheck fails
+                            logger.info(f"❌ Token {token_address} skipped: Unable to assess risk")
+                            tokens_filtered += 1
+                            continue
+                    else:
+                        # If rugcheck is not configured, skip the token
+                        logger.info(f"❌ Token {token_address} skipped: Rugcheck service not configured")
+                        tokens_filtered += 1
+                        continue
                     
-                    # Create and store snapshot
                     try:
-                        snapshot = TokenSnapshot.from_token_profile(
-                            profile=profile,
-                            price_usd=price_usd,
-                            volume_usd=volume_usd,
-                            liquidity_usd=liquidity_usd,
-                            risk_data=risk_data
-                        )
-                        
-                        session.add(snapshot)
-                        session.commit()
-                        
-                        tokens_stored += 1
-                        logger.info(
-                            f"✅ Successfully stored snapshot for {profile.name} ({profile.symbol}):\n"
-                            f"Token: {token_address}\n"
-                            f"Price: ${price_usd:.12f}\n"
-                            f"Volume: ${volume_usd:,.2f}\n"
-                            f"Liquidity: ${liquidity_usd:,.2f}"
-                        )
+                        if existing_token:
+                            # Update existing token
+                            existing_token.price_usd = price_usd
+                            existing_token.volume_usd = volume_usd
+                            existing_token.liquidity_usd = liquidity_usd
+                            existing_token.risk_data = risk_data
+                            existing_token.timestamp = datetime.now()
+                            session.commit()
+                            tokens_updated += 1
+                            logger.info(
+                                f"✅ Successfully updated token {profile.name} ({profile.symbol}):\n"
+                                f"Token: {token_address}\n"
+                                f"Price: ${price_usd:.12f}\n"
+                                f"Volume: ${volume_usd:,.2f}\n"
+                                f"Liquidity: ${liquidity_usd:,.2f}"
+                            )
+                        else:
+                            # Create new token snapshot
+                            snapshot = TokenSnapshot.from_token_profile(
+                                profile=profile,
+                                price_usd=price_usd,
+                                volume_usd=volume_usd,
+                                liquidity_usd=liquidity_usd,
+                                risk_data=risk_data
+                            )
+                            
+                            session.add(snapshot)
+                            session.commit()
+                            
+                            tokens_stored += 1
+                            logger.info(
+                                f"✅ Successfully stored new token {profile.name} ({profile.symbol}):\n"
+                                f"Token: {token_address}\n"
+                                f"Price: ${price_usd:.12f}\n"
+                                f"Volume: ${volume_usd:,.2f}\n"
+                                f"Liquidity: ${liquidity_usd:,.2f}"
+                            )
+
+                            # Send Telegram notification only for new tokens
+                            if notifier:
+                                risk_level = "Unknown"
+                                risk_score = None
+                                if risk_data:
+                                    risk_score = risk_data.get('score')
+                                    if risk_score is not None:
+                                        if risk_score < 500:
+                                            risk_level = "LOW"
+                                        elif risk_score < 750:
+                                            risk_level = "MEDIUM"
+                                        elif risk_score < 1000:
+                                            risk_level = "HIGH"
+                                        else:
+                                            risk_level = "CRITICAL"
+
+                                # Format price with natural precision
+                                price_str = str(Decimal(str(price_usd)))
+                                
+                                message = (
+                                    f"<b>🔥 New Token Alert</b>\n\n"
+                                    f"<b>Token:</b> {profile.name} ({profile.symbol})\n"
+                                    f"<b>Address:</b> <code>{token_address}</code>\n"
+                                    f"<b>Chain:</b> {chain_id}\n"
+                                    f"<b>Price:</b> ${price_str}\n"
+                                    f"<b>Volume:</b> ${volume_usd:,.2f}\n"
+                                    f"<b>Liquidity:</b> ${liquidity_usd:,.2f}\n"
+                                    f"<b>Risk Level:</b> {risk_level}"
+                                )
+                                
+                                if risk_score is not None:
+                                    message += f" ({risk_score})"
+                                    
+                                if profile.url:
+                                    message += f"\n\n<b>Chart:</b> <a href='{profile.url}'>View on DexScreener</a>"
+
+                                try:
+                                    notifier.send_message(message)
+                                except Exception as e:
+                                    logger.error(f"Failed to send Telegram notification: {e}")
+
                     except Exception as e:
-                        logger.error(f"Failed to create or store snapshot: {e}")
+                        logger.error(f"Failed to create or update token: {e}")
                         continue
                     
                 except Exception as e:
@@ -274,8 +373,9 @@ def fetch_and_store_tokens(config: Dict[str, Any]) -> None:
         # Log summary statistics
         logger.info(f"\nToken Processing Summary:")
         logger.info(f"Total Processed: {tokens_processed}")
+        logger.info(f"Updated: {tokens_updated}")
         logger.info(f"Filtered Out: {tokens_filtered}")
-        logger.info(f"Successfully Stored: {tokens_stored}")
+        logger.info(f"New Tokens Stored: {tokens_stored}")
                     
     except Exception as e:
         logger.error(f"Failed to fetch and store tokens: {e}", exc_info=True)
